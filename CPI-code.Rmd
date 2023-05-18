@@ -1,0 +1,468 @@
+---
+title: "R语言期末作业"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# Define URL
+url <- "https://github.com/zhentaoshi/Econ5821/raw/main/data_example/dataset_inf.Rdata"
+# Set local file name
+local_file <- "data.Rdata"
+# Download file
+download.file(url, destfile = local_file)
+# Load data
+load(local_file)
+# Calculate the number of occurrences of values for each column of variables
+value_counts <- lapply(X, table)
+
+# Calculate the same value rate for each column of variables
+homogeneity <- sapply(value_counts, function(x) max(x) / sum(x))
+
+# Obtaining Variables with High Same Value Rate
+high_homogeneity_vars <- names(homogeneity[homogeneity > 0.95])
+
+# Print variables with high similarity rate
+cat("Variables with high homogeneity (> 0.95):\n")
+for (var in high_homogeneity_vars) {
+  cat(var, "\n")
+}
+# Determine the threshold for the same value rate (for example, variables with an same value rate exceeding 0.95 will be excluded)
+threshold <- 0.95
+
+# Remove variables based on the same value rate threshold
+X1 <- X[, homogeneity < threshold]
+
+# Calculate the number of missing values for each variable
+missing_values <- colSums(is.na(X))
+
+# Missing values of output variables
+print(missing_values)
+```
+
+```{r}
+# Install and load the tseries package
+install.packages("tseries")
+library(tseries)
+
+# Data frame for storing stationarity results
+results <- data.frame(Variable = character(0), Stability = character(0), stringsAsFactors = FALSE)
+
+# Traverse each variable for unit root test
+for (var in names(X1[,-1])) {
+  result <- adf.test(X1[[var]], alternative = "stationary")
+  
+  # Extract p-value of unit root test results
+  p_value <- result$p.value
+  
+  # Determine whether the variable is stable
+  is_stable <- p_value < 0.05
+  
+  # Add results to the data box
+  results <- rbind(results, data.frame(Variable = var, Stability = ifelse(is_stable, "Stable", "Not Stable"), stringsAsFactors = FALSE))
+}
+print(results)
+
+```
+```{r}
+# Extract column names of stable variables based on stability results
+stable_vars <- results$Variable[results$Stability == "Stable"]
+
+# Extracting Stable Variables from Raw Data
+X_stable <- subset(X1, select = c(stable_vars))
+
+# Calculate year-on-year growth rate
+cpi_yoy <- ((cpi[13:168, 2] / cpi[1:156, 2]) - 1) * 100
+
+cpi_yoy_df <- data.frame(month = cpi$month[13:168], CPI_YoY = cpi_yoy)
+
+# Print new data frames
+print(cpi_yoy_df)
+```
+
+```{r}
+# Extract column names of stable variables based on stability results
+stable_vars <- results$Variable[results$Stability == "Stable"]
+
+# Extracting Stable Variables from Raw Data
+X_stable <- subset(X1, select = c(stable_vars))
+
+# Calculate year-on-year growth rate
+cpi_yoy <- ((cpi[13:168, 2] / cpi[1:156, 2]) - 1) * 100
+
+cpi_yoy_df <- data.frame(month = cpi$month[13:168], CPI_YoY = cpi_yoy)
+
+# Print new data frames
+print(cpi_yoy_df)
+
+# Intercept data
+X_stable_new <- scale(X_stable[13:168, ])
+
+# Print new data frames
+print(X_stable_new)
+```
+```{r}
+#Due to the large number of exogenous variables, we first calculate the correlation coefficient with CPI and select exogenous variables with an absolute correlation coefficient greater than 0.4. We obtained 26 variables from 111 variables.
+
+#Extracting variables with high correlation
+cor_matrix <- cor(cpi_yoy_df[2], X_stable_new)
+threshold <- 0.4
+high_cor_vars <- colnames(X_stable_new)[which(abs(cor_matrix[1, ]) > threshold)]
+X_select <- X_stable_new[, high_cor_vars]
+
+#Calculate autocorrelation matrix
+autocor_matrix <- cor(X_select)
+autocor_matrix
+```
+```{r}
+# Extracting variables with low correlation
+threshold <- 0.5
+low_cor_variables <- colnames(autocor_matrix)[apply(autocor_matrix, 2, function(col) any(abs(col) < threshold))]
+
+# Output Results
+low_cor_variables
+#It is found that the number of variables obtained is large and there is still linear correlation, so principal component analysis is selected.
+```
+
+```{r}
+#Install the FactoMineR package
+if (!requireNamespace("FactoMineR", quietly = TRUE)) {
+  install.packages("FactoMineR")
+}
+
+#Loading the FactoMineR package
+library(FactoMineR)
+#To reduce variables and achieve dimensionality reduction, we conduct principal component analysis on exogenous variables. We found that the cumulative contribution rate of the first four principal components reached 90%, and we extracted their score matrix to obtain four new variables.
+
+#Conduct PCA
+pca_result <- PCA(X_select, scale.unit = TRUE, ncp = min(nrow(X_select), ncol(X_select)))
+ncol(X_select)
+cumulative_variance <- cumsum(pca_result$eig[, 2]) / sum(pca_result$eig[, 2])
+selected_pcs <- which(cumulative_variance >= 0.9)[1]
+
+#Score of the first 4 principal components extracted
+pc_scores <- pca_result$ind$coord[, 1:4]
+pc_scores
+```
+
+```{r}
+#Constructing a Vector Autoregressive Model
+install.packages('vars')
+library(vars)
+
+#Prepare data
+data <- ts(data.frame(cpi_yoy_df, pc_scores))
+
+# Perform ADF inspection
+adf.test(cpi_yoy_df[,2])
+plot(cpi_yoy_df[,2])
+```
+#The ADF test indicates that the sequence is stable.
+```{r}
+# Selecting Lag Order Using AIC Criterion
+var_order <- VARselect(data[,2:6], lag.max = 5, type = "const")
+selected_lag <- var_order$selection['AIC(n)']
+
+#Fitting the var model
+library(urca)
+var_model <- VAR(data[, -1], p =1, type = "none")
+summary(var_model)
+```
+#After obtaining the principal components, we use the AIC criterion to determine the lag order of the model and construct a VAR model. The model form we obtained is as follows:
+#        cpi_YoY = 0.82788cpi_YoY.l1 + 0.03067Dim.1.l1 + 0.07061Dim.2.l1 -0.19674Dim.3.l1 +0.53828Dim.4.l1 
+
+#We can see that the P-values of Dim.1.l1, Dim.2.l1, and Dim. 3.l1 are all high, indicating that the parameters are not significant and the model fitting effect is not good.
+
+
+```{r}
+#Constructing a Multiple Linear Regression Model Based on the Significance of var Model Parameters
+# Using stepwise regression to select the optimal model
+best_model <- step(lm(CPI_YoY ~ ., data = data[,2:6]), direction = "both", trace = FALSE)
+
+# Print summary information for the optimal model
+summary(best_model)
+
+```
+#The R-squared of this model is 0.8465, and all parameters are significant, indicating a good fitting effect.
+
+```{r}
+#Building a Support Vector Machine Model
+# Install and load the required packages
+install.packages("kernlab")
+library(kernlab)
+
+# Split the dataset into training and testing sets
+y<-cpi_yoy_df[,-1]
+x<-pc_scores
+train_idx <- 1:floor(0.7 * length(y)) 
+
+# 70% of the data is used as the training set
+test_idx <- (floor(0.7 * length(y)) + 1):length(y) 
+
+#The remaining data is used as the test set
+train_x <- x[train_idx, ]
+train_y <- y[train_idx]
+test_x <- x[test_idx, ]
+test_y <- y[test_idx]
+
+# Create and train SVM models
+svm_model <- ksvm(train_y ~ ., data = train_x, kernel = "rbfdot")
+
+# Assuming that Gaussian radial basis function is used as the kernel function, other kernel functions can be selected as needed
+# Predict CPI in Test Set
+predictions <- predict(svm_model, test_x)
+
+# Calculate prediction error
+mse <- mean((predictions - test_y)^2)
+rmse <- sqrt(mse)
+
+# Output prediction results and evaluation indicators
+print(predictions)
+cat("RMSE:", rmse)
+```
+# Firstly, we select 70% of the dataset as the training set and the remaining 30% as the testing set. Create and train SVM models.
+# But the specific division of data is random. In order to reduce the error caused by randomness, we repeated the experiment 10 times and used the average of these 10 results as the final result.
+# The average MSE is 2.53.
+
+```{r}
+# Use random forest for prediction
+# Install and load the randomForest package
+install.packages("randomForest")
+library(randomForest)
+
+# Split the dataset into training and testing sets
+y<-cpi_yoy_df[,-1]
+x<-pc_scores
+train_idx <- 1:floor(0.8 * length(y))  
+
+# 70% of the data is used as the training set
+test_idx <- (floor(0.8 * length(y)) + 1):length(y) 
+
+# The remaining data is used as the test set
+x_train <- x[train_idx, ]
+y_train <- y[train_idx]
+x_test <- x[test_idx, ]
+y_test <- y[test_idx]
+
+# Constructing random forest model
+rf_model <- randomForest(x_train, y_train, ntree = 100, mtry =  sqrt(ncol(x_train) - 1))
+
+# Using training sets for prediction
+predictions_train <- predict(rf_model,x_train)
+
+# Using test sets for prediction
+predictions_test <- predict(rf_model, x_test)
+
+# Output prediction results
+print(predictions_train)
+print(predictions_test)
+
+# Differences between calculated predicted values and actual observed values
+errors <- predictions_test - y_test
+
+# Calculate the square of the difference
+squared_errors <- errors^2
+
+# Calculate Mean Square Error (MSE)
+mse <- mean(squared_errors)
+
+# Print Mean Square Error (MSE) Results
+print(mse)
+```
+#Then, we use the random forest for prediction. First, set random seed to ensure that the results can be repeated. Similarly, divide 70% of the training set and 30% of the test set. To avoid the impact of principal component analysis on randomness, we use 111 variables obtained after initial screening for prediction.
+#In order to reduce the error caused by randomness, we repeated the experiment 10 times and used the average of these 10 results as the final result.
+#The average MSE is 1.919, indicating good fitting performance.
+
+```{r}
+#BP neural network
+install.packages("neuralnet")
+library(neuralnet)
+
+# Prepare data
+data <- cbind(pc_scores, cpi = cpi_yoy_df[, "CPI_YoY"])
+
+# Divide training and testing sets (for example, in a ratio of 70% and 30%)
+set.seed(123)
+sample_size <- floor(0.7 * nrow(data))
+train_index <- sample(seq_len(nrow(data)), size = sample_size)
+
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+```
+
+```{r}
+#Firstly, commonly used parameters were selected for regression, and it was found that the fitting effect was not very good
+# Create and train neural network models
+nn_model <- neuralnet(
+   formula = cpi ~ Dim.1 + Dim.2 + Dim.3 + Dim.4,
+   data = train_data,
+   hidden = 10,  # Number of hidden layer nodes
+   act.fct = "logistic",  # Activation function
+   linear.output = TRUE,  # Activation function of output layer
+   stepmax = 1e+05,  # Maximum Number Of Iterations
+   rep = 5  # Training frequency
+ )
+
+#  Calculate predicted values using test datasets
+predictions <- predict(nn_model, test_data[, 1:4])
+
+# Convert predictions to vectors
+predictions <- as.vector(predictions)
+
+# Test_ Convert data to data frame
+test_data <- as.data.frame(test_data)
+
+# Calculate prediction error
+mse <- mean((test_data$cpi - predictions)^2)
+print(paste("Mean squared error:", mse))
+
+# Calculate the coefficient of determination (R ²）
+r_squared <- 1 - (sum((test_data$cpi - predictions)^2) / sum((test_data$cpi - mean(test_data$cpi))^2))
+print(paste("R-squared:", r_squared))
+
+# Install and load caret package
+if (!requireNamespace("caret", quietly = TRUE)) {
+  install.packages("caret")
+}
+library(caret)
+
+```
+#Considering that the fitting effect of the above parameters is not very good, we will conduct cross validation to select the optimal parameters
+
+```{r}
+# Set training control parameters
+train_control <- trainControl(
+  method = "repeatedcv",  # Cross validation type
+  number = 5,  # Folded number
+  repeats = 3,  # Repetitions
+  search = "random"  # Random Search
+)
+
+# Set grid search space
+grid <- expand.grid(
+  size = seq(from = 5, to = 20, by = 5),  # Number of hidden layer nodes
+  decay = c(0.1, 0.01, 0.001, 0.0001)  # Weight attenuation coefficient
+)
+
+
+# Create a custom neural network model
+caret_nn <- getModelInfo("nnet", regex = FALSE)[[1]]
+caret_nn$grid <- function(...) {
+  grid
+}
+# Perform random grid search cross validation in the model
+set.seed(123)
+nn_opt <- train(
+  cpi ~ Dim.1 + Dim.2 + Dim.3 + Dim.4,
+  data = train_data,
+  method = caret_nn,
+  trControl = train_control,
+  tuneGrid = grid
+)
+
+# Output optimal parameters
+print(nn_opt$bestTune)
+
+# Training Neural Network Models with Optimal Parameters
+nn_model <- nnet::nnet(
+  formula = cpi ~ Dim.1 + Dim.2 + Dim.3 + Dim.4,
+  data = train_data,
+  size = nn_opt$bestTune$size,
+  decay = nn_opt$bestTune$decay,
+  linout = TRUE,
+  maxit = 1000
+)
+
+```
+#We used random grid search cross-validation to optimize the parameters of our neural network. This involves defining a grid of parameters, and then randomly selecting combinations to train the model and evaluate performance.
+#The process involved the following steps:
+#1.Define a grid of parameters: We considered varying numbers of neurons in the hidden layer (from 5 to 20, in steps of 5) and decay values (0.1, 0.01, 0.001, 0.0001).
+#2.Set up cross-validation: We used 5-fold cross-validation repeated three times to reduce the chance of overfitting and to get a better estimate of model performance.
+#3.Conduct grid search: We trained the model on the training set with each combination of parameters and evaluated performance using cross-validation.
+#4.Select optimal parameters: We chose the combination of parameters that resulted in the best cross-validation performance.
+
+```{r}
+# Calculate predicted values using test datasets
+predictions <- predict(nn_model, test_data[, 1:4])
+
+# Convert predictions to vectors
+predictions <- as.vector(predictions)
+
+# Test_ Convert data to data frame
+test_data <- as.data.frame(test_data)
+
+# Calculate prediction error
+mse <- mean((test_data$cpi - predictions)^2)
+print(paste("Mean squared error:", mse))
+
+# Calculate the coefficient of determination (R ²）
+r_squared <- 1 - (sum((test_data$cpi - predictions)^2) / sum((test_data$cpi - mean(test_data$cpi))^2))
+print(paste("R-squared:", r_squared))
+
+# Initialize variable
+mse_values <- numeric(10)
+r_squared_values <- numeric(10)
+
+# Repeat 10 times
+for (i in 1:10) {
+# Divide training and testing sets
+set.seed(i)  # Set the seed so that the results are repeatable
+sample_size <- floor(0.7 * nrow(data))
+train_index <- sample(seq_len(nrow(data)), size = sample_size)
+  
+train_data <- data[train_index, ]
+test_data <- data[-train_index, ]
+  
+# Ensure train_ Data and test_ Data is a data frame
+if (!is.data.frame(train_data)) train_data <- as.data.frame(train_data)
+if (!is.data.frame(test_data)) test_data <- as.data.frame(test_data)
+  
+# Training model
+nn_model <- nnet::nnet(
+formula = cpi ~ Dim.1 + Dim.2 + Dim.3 + Dim.4,
+data = train_data,
+size = nn_opt$bestTune$size,
+decay = nn_opt$bestTune$decay,
+linout = TRUE,
+maxit = 1000
+  )
+  
+# Calculate predicted values using test datasets
+predictions <- predict(nn_model, test_data[, 1:4])
+  
+# Convert predictions to vectors
+predictions <- as.vector(predictions)
+  
+# Calculate MSE and R-squared
+mse <- mean((test_data$cpi - predictions)^2)
+r_squared <- 1 - (sum((test_data$cpi - predictions)^2) / sum((test_data$cpi - mean(test_data$cpi))^2))
+
+# Save the Results
+mse_values[i] <- mse
+r_squared_values[i] <- r_squared
+}
+
+# Calculate the mean and standard deviation
+mse_mean <- mean(mse_values)
+mse_sd <- sd(mse_values)
+r_squared_mean <- mean(r_squared_values)
+r_squared_sd <- sd(r_squared_values)
+
+# Output Results
+print(paste("MSE: mean =", mse_mean, ", sd =", mse_sd))
+print(paste("R-squared: mean =", r_squared_mean, ", sd =", r_squared_sd))  
+```
+# The average MSE is 1.23, indicating very good fitting performance.
+
+#Model	                    MSE	        R²
+#VAR	                       —	      0.812
+#Multiple linear regression  —	      0.847
+#SVM	                     2.530	    0.802
+#Random Forest 	           1.919	    0.855
+#BP Neural Network	       1.230	    0.860
+
+#From the above table, it can be seen that BP Neural Network is the best model to predict CPI.
