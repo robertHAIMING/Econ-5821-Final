@@ -1,0 +1,175 @@
+---
+title: "随机森林预测CPI"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Import real test data
+```{r warning=FALSE }
+url <- "https://github.com/zhentaoshi/Econ5821/raw/main/data_example/dataset_inf.Rdata"
+# Set local file name
+filename <- "dataset_inf.Rdata"
+
+# Download file
+download.file(url, destfile = filename, mode = "wb")
+
+# Read data file
+load(filename)
+```
+
+```{r warning=FALSE }
+url <- "https://github.com/zhentaoshi/Econ5821/raw/main/data_example/data_oos.Rdata"
+# Set local file name
+filename1 <- "real_dataset_inf.Rdata"
+
+# Download file
+download.file(url, destfile = filename1, mode = "wb")
+
+# Read data file
+load(filename1)
+```
+
+```{r}
+
+# Calculate the number of occurrences of values for each column of variables
+View(X)
+value_counts <- lapply(X, table)
+
+# Calculate the same value rate for each column of variables
+homogeneity <- sapply(value_counts, function(x) max(x) / sum(x))
+
+# Obtaining Variables with High Same Value Rate
+high_homogeneity_vars <- names(homogeneity[homogeneity > 0.95])
+
+# Print variables with high similarity rate
+cat("Variables with high homogeneity (> 0.95):\n")
+for (var in high_homogeneity_vars) {
+  cat(var, "\n")
+}
+
+# Determine the threshold for the same value rate (for example, variables with an same value rate exceeding 0.95 will be excluded)
+threshold <- 0.95
+
+# Remove variables based on the same value rate threshold
+X1 <- X[, homogeneity < threshold]
+
+# Calculate the number of missing values for each variable
+missing_values <- colSums(is.na(X))
+
+# Missing values of output variables
+print(missing_values)
+```
+
+```{r}
+# Install and load the tseries package
+install.packages("tseries")
+library(tseries)
+
+# Data frame for storing stationarity results
+results <- data.frame(Variable = character(0), Stability = character(0), stringsAsFactors = FALSE)
+
+# Traverse each variable for unit root test
+for (var in names(X1[,-1])) {
+  result <- adf.test(X1[[var]], alternative = "stationary")
+  
+  # Extract p-value of unit root test results
+  p_value <- result$p.value
+  
+  # Determine whether the variable is stable
+  is_stable <- p_value < 0.05
+  
+  # Add results to the data box
+  results <- rbind(results, data.frame(Variable = var, Stability = ifelse(is_stable, "Stable", "Not Stable"), stringsAsFactors = FALSE))
+}
+
+# Print smoothness results
+print(results)
+
+```
+
+```{r}
+# Extract column names of stable variables based on stability results
+stable_vars <- results$Variable[results$Stability == "Stable"]
+X_stable <- subset(X1, select = c(stable_vars))
+cpi1 <- rbind(cpi, real.cpi)
+
+# Calculate year-on-year growth rate
+cpi_yoy <- ((cpi[13:168, 2] / cpi[1:156, 2]) - 1) * 100
+cpi1_yoy <- ((cpi1[13:198, 2] / cpi1[1:186, 2]) - 1) * 100
+
+# Keep only the months 169-198
+cpi1_yoy_df <- data.frame(month = cpi1$month[169:198], CPI_YoY = tail(cpi1_yoy, 30))
+X_subset <- scale(X_stable[13:nrow(X_stable), ])
+cor_matrix <- cor(cpi_yoy, X_subset)
+
+# Extracting variables with high correlation
+threshold <- 0.4
+high_cor_vars <- which(abs(cor_matrix) > threshold)
+
+real.X_select<-real.X[,high_cor_vars]
+X1 <- rbind(X, real.X)
+X1_select<-scale(X1[,high_cor_vars])
+```
+
+```{r}
+#Conduct PCA
+library(FactoMineR)
+pca_result1 <- PCA(X1_select, scale.unit = TRUE, ncp = min(nrow(X1_select), ncol(X1_select)))
+
+ncol(X1_select)
+
+cumulative_variance <- cumsum(pca_result1$eig[, 2]) / sum(pca_result1$eig[, 2])
+selected_pcs <- which(cumulative_variance >= 0.9)[1]
+
+#Score of the first 4 principal components extracted
+pc_scores_select <- pca_result1$ind$coord[, 1:4]
+pc_scores_select1 <- tail(pc_scores_select, 30)
+pc_scores_select1
+```
+
+```{r}
+# Use random forest for prediction
+# Install and load the randomForest package
+install.packages("randomForest")
+library(randomForest)
+
+# Split the dataset into training and testing sets
+y<-cpi1_yoy_df[2]
+x<-pc_scores_select1
+train_idx <- 1:floor(0.7 * nrow(y))  # 70% of the data is used as the training set
+test_idx <- (floor(0.7 * nrow(y)) + 1):nrow(y)  # The remaining data is used as the test set
+x_train <- x[train_idx, ]
+y_train <- y[train_idx,]
+x_test <- x[test_idx, ]
+y_test <- y[test_idx,]
+
+# Constructing random forest model
+rf_model <- randomForest(x_train, y_train, ntree = 100, mtry =  sqrt(ncol(x_train) - 1))
+
+# Using training sets for prediction
+predictions_train <- predict(rf_model,x_train)
+
+# Using test sets for prediction
+predictions_test <- predict(rf_model, x_test)
+
+# Output prediction results
+prediction_cpi_yoy<-c(predictions_train,predictions_test)
+prediction_cpi_yoy
+```
+
+```{r}
+#Error between calculation and true value
+errors<-prediction_cpi_yoy-y$CPI
+squared_errors <- errors^2
+mse <- mean(squared_errors)
+mse
+```
+
+```{r}
+#grading
+R_squared<- 1- (sum(prediction_cpi_yoy-y$CPI-mean(prediction_cpi_yoy-y$CPI))^2)/sum(y$CPI-mean(y$CPI))^2
+R_squared
+```
+
