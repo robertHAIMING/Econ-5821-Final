@@ -1,0 +1,529 @@
+---
+title: "期末预测PPI"
+output:
+  html_document: default
+  pdf_document: default
+date: '2023-05-17'
+editor_options:
+  markdown:
+    wrap: 72
+---
+## Data pre-processing
+Data preprocessing is very important in machine learning and data analysis. It is essential to obtain accurate and reliable models and results.  \n  
+We did the following data preprocessing:  \n  
+(1)A threshold of 0.95 is set to eliminate variables with a higher rate of homogeneity.  \n  
+(2)The year-on-year growth rates of ppi and cpi are generated to better predict the inflation rate.  \n  
+(3)Convert the data into time series data for subsequent modeling.  \n  
+(4)The stationarity test is carried out to eliminate the variables that do not satisfy the stationarity.  \n  
+(5)Normalization processes the data to eliminate dimensional differences between different variables.  \n  
+The specific steps are as follows.  \n  
+
+ Import data
+```{r warning=FALSE }
+url <- "https://github.com/zhentaoshi/Econ5821/raw/main/data_example/dataset_inf.Rdata"
+# Set local file name
+filename <- "dataset_inf.Rdata"
+
+# Download file
+download.file(url, destfile = filename, mode = "wb")
+
+# Read data file
+load(filename)
+```
+ Remove variables with high same-value rates
+```{r}
+# Count the number of occurrences of the value of each column variable
+value_counts <- lapply(X, table)
+# Calculate the parity rate of each column variable
+homogeneity <- sapply(value_counts, function(x) max(x) / sum(x))
+# Gets the variable with a high rate of homogeneity
+high_homogeneity_vars <- names(homogeneity[homogeneity > 0.95])
+# Print variables with high rates of the same value
+cat("Variables with high homogeneity (> 0.95):\n")
+for (var in high_homogeneity_vars) {
+  cat(var, "\n")
+}
+# Determine a threshold for the same rate (e.g., variables with a rate above 0.95 will be eliminated)
+threshold <- 0.95
+# Remove variables according to the threshold of the same rate
+X1 <- X[, homogeneity < threshold]
+```
+
+Generate the year-on-year growth rates of ppi
+```{r warning=FALSE }
+
+# Calculated year-on-year growth rate of ppi（inflation rate）
+ppi_yoy <- ((ppi[13:168, 2] / ppi[1:156, 2]) - 1)*100
+
+ppi_yoy_df <- data.frame(month = ppi$month[13:168], PPI_YoY = ppi_yoy)
+X1 <- X1[13:168, ]
+
+#Convert the data into time series data 
+# Calculate the year and month
+years <- floor((X1$month - 1) / 12) + 2000
+months <- (X1$month - 1) %% 12 + 1
+
+# The xts function is used to convert the data into time series data
+library(zoo)
+library(xts)
+dates <- as.Date(paste0(years, "-", months, "-01"))
+X1 <- xts(X1[, -1], order.by = dates)
+#head(X1)
+
+dates <- as.Date(paste0(years, "-", months, "-01"))
+ppi_yoy_df <- xts(ppi_yoy_df [, -1], order.by = dates)
+#head(ppi_yoy_df )
+```
+
+```{r warning=FALSE}
+# Install and load the tseries package
+library(tseries)
+#  A data box for storing stationary results
+results <- data.frame(Variable = character(0), Stability = character(0), stringsAsFactors = FALSE)
+
+# Each variable is traversed for a unit root check
+for (var in names(X1)) {
+  result <- adf.test(X1[,var], alternative = "stationary")
+  #  Extract the p-value of the unit root test result
+  p_value <- result$p.value
+  # Determine whether the variable is stationary
+  is_stable <- p_value < 0.05
+  # Add the result to the data box
+  results <- rbind(results, data.frame(Variable = var, Stability = ifelse(is_stable, "Stable", "Not Stable"), stringsAsFactors = FALSE))
+}
+
+# Print stationary results
+print(results)
+
+# Extract the column names of stable variables from the stability results
+stable_vars <- results$Variable[results$Stability == "Stable"]
+
+# Extract stable variables from the original data
+X_stable <- subset(X1, select = c(stable_vars))
+```
+```{r}
+#Detection of multicollinearity Severe multicollinearity was found in k>1000
+kappa(X_stable)
+```
+```{r}
+
+# custom normalization function
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+# apply normalization to entire data frame
+data_standard <- as.data.frame(apply(X_stable,2,normalize))
+```
+```{r}
+#combine PPI_yoy and independent variables
+data <- cbind(data_standard, ppi_yoy_df)
+```
+1. Divide the training set and test set
+```{r echo = TRUE, warning=FALSE, results='hide'}
+#The independent variable was merged with the PPI data
+data <- cbind(data_standard, ppi_yoy_df)
+#dim(data)
+# Determine partition point
+n_train <- round(nrow(data) * 0.8)
+# Divide the training set and test set
+train_ <- data[1:n_train,]
+test_ <- data[(n_train + 1):nrow(data),]
+# Convert the data into a matrix
+x1 <- as.matrix(train_[, 1:(ncol(train_) - 1)])
+x2 <- as.matrix(test_[, 1:(ncol(test_) - 1)])
+y1 <- train_[, ncol(train_)]
+y2 <- test_[, ncol(test_)]
+# Transform data structure
+x1 <- array(x1, dim = c(dim(x1)[1], dim(x1)[2], 1))
+x2 <- array(x2, dim = c(dim(x2)[1], dim(x2)[2], 1))
+```
+
+RNN (Recurrent Neural Network) and LSTM (Recurrent short-term memory network) both belong to a class of recurrent neural network models used to process sequential data.
+The main differences are as follows:
+(1)Parameter structure: LSTM introduces the structure of gated unit and has more parameters than traditional RNN to control the flow and forgetting of information.
+(2)Long-term dependence: LSTM can better capture long-term dependence through the design of gated unit. Traditional RNN is prone to gradient disappearance or gradient explosion when processing long sequences, which makes it difficult to capture long-term dependence.
+(3)Computational efficiency: Compared with traditional RNN, LSTM has higher computational complexity because it introduces more parameters and computation steps.
+(4)Application scenario: Traditional RNN is suitable for processing short sequence data or scenarios requiring fast calculation. LSTMS perform better on tasks that are more important for dealing with long sequences and long-term dependencies.
+LSTM is an improved version of RNN, which solves the problem of traditional RNN when dealing with long sequences by introducing the design of gated unit. LSTM has advantages in tasks dealing with long-term dependencies and is widely used in modeling and forecasting for a variety of sequence data.
+
+2. RNN
+- Build the model and train the data
+```{r echo = TRUE, warning=FALSE, results='hide'}
+#install.packages("keras")
+#install.packages("tensorflow")
+#install.packages("tidyverse")
+#install.packages("magrittr")
+library(keras)
+library(tensorflow)
+library(tidyverse)
+library(magrittr)
+# Build a model
+model <- keras_model_sequential() %>%
+  layer_lstm(units = 64, input_shape = c(ncol(x1), 1)) %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = 1)
+# Compilation model
+model %>% compile(
+  loss = "mean_squared_error",
+  optimizer = optimizer_adam(),
+  metrics = c("mean_absolute_error")
+)
+# Training model
+history <- model %>% fit(
+  x1, y1,
+  epochs = 100,
+  batch_size = 32,
+  validation_data = list(x2, y2),
+  verbose = 1
+)
+```
+- Show the forecast results
+```{r echo = TRUE, error=FALSE, warning=FALSE}
+# Anticipate and visualize the results
+y_pred <- model %>% predict(x2)
+plot(y2, type = "l", col = "blue")
+lines(y_pred, col = "red")
+# Calculate MSE and R-squared
+#install.packages("caret")
+#library(caret)
+mse_RNN <- mean((y_pred - y2)^2)
+r_squared_RNN <- cor(y_pred, y2)^2
+mse_RNN
+r_squared_RNN
+```
+
+3. LSTM
+- Build the model and train the data
+```{r echo = TRUE, warning=FALSE, results='hide'}
+# Define the LSTM model
+model <- keras_model_sequential() %>%
+  layer_lstm(units = 64, return_sequences = TRUE, input_shape = c(dim(x1)[2], dim(x1)[3])) %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_lstm(units = 32, return_sequences = FALSE) %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 1)
+#summary(model)
+# Compilation model
+model %>% compile(
+  loss = "mse",
+  optimizer = optimizer_adam(lr = 0.001),
+  metrics = list("mse")
+)
+# Training model
+history <- model %>% fit(
+  x1, y1,
+  batch_size = 32,
+  epochs = 50,
+  validation_data = list(x2, y2),
+  verbose = 2
+)
+```
+- Show the forecast results
+```{r echo = TRUE, warning=FALSE}
+# Anticipate and visualize the results
+y_pred <- model %>% predict(x2)
+plot(y2, type = "l", col = "blue")
+lines(y_pred, col = "red")
+# Calculate MSE and R-squared
+mse_LSTM <- mean((y_pred - y2)^2)
+r_squared_LSTM <- cor(y_pred, y2)^2
+mse_LSTM 
+r_squared_LSTM
+```
+The two graphs show the predicted values of the two models which is red compared to the true values which is blue.  \n  
+By observing the MSE and R-square of the two models, we can find that the two prediction results are both not ideal, so we do not recommend using these two models to predict the inflation rate.
+
+In our dataset, there are many kinds of independent variables and high multicollinearity, so ordinary regression predictions will be less effective. So we consider using machine learning methods that can reduce dimensionality – the lasso regression method, the Ridge regression, the random forest and combined models.
+
+4.LASSO:LASSO is a regularization method for linear regression. It constrains the size of regression coefficients by adding an L1 penalty term, and can set some regression coefficients to zero during the penalty process, thereby achieving feature selection.
+```{r warning=FALSE }
+# Determine partition point
+n_train <- round(nrow(data) * 0.8)
+
+# Divide the training set and test set
+train_ <- data[1:n_train,]
+test_ <- data[(n_train + 1):nrow(data),]
+
+# Convert the data into a matrix
+x1 <- as.matrix(train_[, 1:103])
+x2 <- as.matrix(test_[, 1:103])
+y1 <- train_[, 104]
+y2 <- test_[, 104]
+
+
+library(Matrix)
+#install.packages("glmnet")
+library(glmnet)
+
+#lasso
+#10-fold cross-validation to determine the best lamda
+cv.fit<-cv.glmnet(x1,y1,alpha=1,nfolds=10,family = "gaussian",type.measure="mse")
+cv.fit$lambda.1se
+coef(cv.fit,s=cv.fit$lambda.1se)
+lasso.pred=predict(cv.fit,newx=x2, s=cv.fit$lambda.1se)   
+mse_lasso<-mean((lasso.pred-y2)^2)
+mse_lasso
+r_squared_Lasso<- cor(lasso.pred, y2)^2
+r_squared_Lasso
+```
+
+5.Ridge: It uses L2 regularization, which adds a penalty term based on the square of the coefficients to the loss function. This effectively shrinks all regression coefficients towards zero, but they will not be exactly zero.
+```{r warning=FALSE }
+# Determine partition point
+n_train <- round(nrow(data) * 0.8)
+
+# Divide the training set and test set
+train_ <- data[1:n_train,]
+test_ <- data[(n_train + 1):nrow(data),]
+
+# Convert the data into a matrix
+x1 <- as.matrix(train_[, 1:103])
+x2 <- as.matrix(test_[, 1:103])
+y1 <- train_[, 104]
+y2 <- test_[, 104]
+library(MASS)
+library(glmnet)
+
+set.seed(123)
+
+fit <- glmnet(x1, y1, alpha=0)
+
+# 10-fold cross-validation to determine the best lamda度
+cv.fit <- cv.glmnet(x1, y1, alpha=0, nfolds=10)
+best.lambda <- cv.fit$lambda.min
+ridge <- glmnet(x1, y1, alpha=0, lambda=best.lambda)
+
+
+ridge.y0 <- predict(ridge, newx = x2,s=10)
+#calculate MSE
+mse_ridge<-mean((y2 - ridge.y0)^2)
+mse_ridge
+#R squared
+r_squared_ridge<- cor(ridge.y0,y2)^2
+r_squared_ridge
+```
+
+6.Random Forest
+```{r}
+
+# Determine partition point
+n_train <- round(nrow(data) * 0.8)
+
+# Divide the training set and test set
+train_ <- data[1:n_train,]
+test_ <- data[(n_train + 1):nrow(data),]
+
+# Convert the data into a matrix
+x1 <- as.matrix(train_[, 1:103])
+x2 <- as.matrix(test_[, 1:103])
+y1 <- train_[, 104]
+y2 <- test_[, 104]
+
+library(randomForest)
+set.seed(12345)
+(rFM<-randomForest(y1~.,data=train_,importance=TRUE,proximity=TRUE))
+
+Fit<-predict(rFM,test_)
+mse_FM<-mean((Fit-y2)^2)
+mse_FM
+r_squared_FM <- cor(Fit, y2)^2
+r_squared_FM
+#Importance measure
+head(treesize(rFM))   
+head(getTree(rfobj=rFM,k=1,labelVar=TRUE))
+barplot(rFM$importance[,2],main="输入变量重要性测度(预测精度变化)指标柱形图")
+importance(rFM,type=1)
+mse_FM
+r_squared_FM
+```
+
+
+
+
+%IncMSE refers to the percentage increase in the sum of squared errors of the model compared to the original model after the value of a variable is randomly shuffled, that is, the importance of a variable is assessed by comparing the degree of impact of a variable on the model's predictions. The larger the IncMSE, the greater the contribution of the variable to the model prediction and the greater the importance of the variable.
+```{r}
+# Calculate the importance of all variables in a random forest
+rf_importance <- importance(rFM, type = 1)
+imp_matrix <- as.matrix(rf_importance)
+# Extract the variable name of %IncMSE greater than 0
+selected_vars <- rownames(imp_matrix)[imp_matrix[, 1] > 1]
+print(selected_vars)
+
+```
+
+7.Random Forest+Ridge: Use variables selected by random forests in ridge regression
+```{r}
+# Extract random forest important variables from the original normalized data
+data_fm <- subset(data, select = c(selected_vars))
+
+n_train2 <- round(nrow(data_fm) * 0.8)
+
+
+train_ <- data_fm[1:n_train2,]
+test_ <- data_fm[(n_train2 + 1):nrow(data_fm),]
+
+x1 <- as.matrix(train_[, 1:51])
+x2 <- as.matrix(test_[, 1:51])
+y1 <- train_[, 52]
+y2 <- test_[, 52]
+###Ridge again
+library(MASS)
+library(glmnet)
+
+set.seed(123)
+
+fit <- glmnet(x1, y1, alpha=0)
+cv.fit <- cv.glmnet(x1, y1, alpha=0, nfolds=10)
+best.lambda <- cv.fit$lambda.min
+
+ridge <- glmnet(x1, y1, alpha=0, lambda=best.lambda)
+
+
+ridge.y0 <- predict(ridge, newx = x2,s=10)
+#calculate MSE
+mse_RM_Ridge<-mean((y2 - ridge.y0)^2)
+mse_RM_Ridge
+#R squared
+r_squared_RM_Ridge<- cor(ridge.y0,y2)^2
+r_squared_RM_Ridge
+```
+
+
+8.Random Forest+LASSO:Use variables selected by random forests in Lasso regression
+```{r}
+
+library(glmnet)
+data_fm <- subset(data, select = c(selected_vars))
+
+n_train2 <- round(nrow(data_fm) * 0.8)
+
+train_ <- data_fm[1:n_train2,]
+test_ <- data_fm[(n_train2 + 1):nrow(data_fm),]
+
+
+x1 <- as.matrix(train_[, 1:51])
+x2 <- as.matrix(test_[, 1:51])
+y1 <- train_[, 52]
+y2 <- test_[, 52]
+
+cv.fit<-cv.glmnet(x1,y1,alpha=1,nfolds=10,family = "gaussian",type.measure="mse")
+cv.fit$lambda.1se
+coef(cv.fit,s=cv.fit$lambda.1se)
+lasso.pred=predict(cv.fit,newx=x2, s=cv.fit$lambda.1se)   
+mse_RM_Lasso<-mean((lasso.pred-y2)^2)
+mse_RM_Lasso
+r_squared_RM_Lasso<- cor(lasso.pred, y2)^2
+r_squared_RM_Lasso
+```
+
+```{r}
+#Compare the results of the above models on the PPI inflation rate together
+models <- c("RNN","LSTM","Lasso", "Ridge", "RF", "RF+Ridge", "RF+Lasso")
+Rsquare <- c(r_squared_RNN, r_squared_LSTM, r_squared_Lasso, r_squared_ridge, r_squared_FM, r_squared_RM_Ridge, r_squared_RM_Lasso)
+MSE <- c(mse_RNN, mse_LSTM,mse_lasso, mse_ridge, mse_FM, mse_RM_Ridge, mse_RM_Lasso)
+
+table <- data.frame(Model = models, `R squared` = Rsquare, `MSE` = MSE)
+
+print(table)
+
+```
+
+In comparison, LASSO has a higher R square and the smallest mse, so LASSO was chosen to anticipate PPI infaltion rate.
+
+# Import the real test set
+```{r warning=FALSE }
+url <- "https://github.com/zhentaoshi/Econ5821/raw/main/data_example/data_oos.Rdata"
+# Set local file name
+filename1 <- "real_dataset_inf.Rdata"
+
+# Download file
+download.file(url, destfile = filename1, mode = "wb")
+
+# Read data file
+load(filename1)
+```
+
+Convert the true value into a time series
+```{r}
+library(zoo)
+library(xts)
+years_1 <- floor((real.X$month - 1) / 12) + 2000
+months_1<- (real.X$month - 1) %% 12 + 1
+dates_1 <- as.Date(paste0(years_1, "-", months_1, "-01"))
+real.X <- xts(real.X[, -1], order.by = dates_1)
+
+```
+
+
+Standardize data
+```{r}
+# custom normalization function
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+# apply normalization to entire data frame
+real.X_standard <- as.data.frame(apply(real.X,2,normalize))
+```
+
+Select the variables selected in the preprocessing in the real test set
+```{r}
+real_X<- subset(real.X_standard, select = c(stable_vars))
+```
+
+Prediction with lasso
+```{r warning=FALSE }
+# Determine partition point
+n_train <- round(nrow(data) * 0.8)
+
+# Divide the training set and test set
+train_ <- data[1:n_train,]
+test_ <- data[(n_train + 1):nrow(data),]
+
+# Convert the data into a matrix
+x1 <- as.matrix(train_[, 1:103])
+x2 <- as.matrix(test_[, 1:103])
+y1 <- train_[, 104]
+y2 <- test_[, 104]
+real_X<-as.matrix(real_X)
+
+library(Matrix)
+#install.packages("glmnet")
+library(glmnet)
+#lasso
+#10-fold cross-validation to determine the best lamda
+cv.fit<-cv.glmnet(x1,y1,alpha=1,nfolds=10,family = "gaussian",type.measure="mse")
+cv.fit$lambda.1se
+coef(cv.fit,s=cv.fit$lambda.1se)
+lasso.pred=predict(cv.fit,newx=real_X, s=cv.fit$lambda.1se)  
+```
+# Here are the 30 values we predicted
+```{r warning=FALSE }
+lasso.pred
+```
+
+Prediction effect based on true value
+```{r}
+
+merged_ppi<-rbind(ppi,real.ppi)
+# Calculated year-on-year growth rate of ppi（inflation rate）
+ppi_yoy_1 <- ((merged_ppi[13:198, 2] / merged_ppi[1:186, 2]) - 1)*100
+
+ppi_yoy_df_1 <- data.frame(month = merged_ppi$month[13:198], PPI_YoY = ppi_yoy_1)
+
+years_2 <- floor((ppi_yoy_df_1$month - 1) / 12) + 2000
+months_2<- (ppi_yoy_df_1$month - 1) %% 12 + 1
+dates_2 <- as.Date(paste0(years_2, "-", months_2, "-01"))
+ppi_yoy_df_1_real<- xts(ppi_yoy_df_1[, -1], order.by = dates_2)
+
+mse_lasso_1<-mean((lasso.pred-ppi_yoy_df_1_real[157:186])^2)
+mse_lasso_1
+r_squared_Lasso_1<- cor(lasso.pred, ppi_yoy_df_1_real[157:186])^2
+r_squared_Lasso_1
+```
+
+Acquire out-of-sample R-squared
+```{r}
+R_squared_OOS<-1-var(ppi_yoy_df_1_real[157:186]-lasso.pred)/var(ppi_yoy_df_1_real[157:186])
+R_squared_OOS
+```
+
